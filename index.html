@@ -139,7 +139,8 @@
       "McCloud River", "Pit River", "Owens River", "Lower Owens River", "Upper Owens River",
       "Kern River", "Kings River", "San Joaquin River", "Stanislaus River", "Tuolumne River",
       "Merced River", "Trinity River", "Klamath River", "Smith River", "Mattole River",
-      "Eel River", "Russian River", "Fall River", "Hat Creek", "Putah Creek", "Upper Sacramento River"
+      "Eel River", "Russian River", "Fall River", "Hat Creek", "Putah Creek", "Upper Sacramento River",
+      "North Fork Yuba River", "Middle Fork Yuba River", "South Fork Yuba River", "Lower Yuba River"
     ]);
     const TROUT_CREEK_WHITELIST = new Set([
       "Hat Creek", "Putah Creek", "Hot Creek", "Silver Creek", "Rush Creek", "Lee Vining Creek",
@@ -794,12 +795,19 @@
       sites = sites.filter(s => looksTrouty(s.label))
                    .sort((a,b) => a.dist - b.dist);
 
+      // Fork-aware grouping: treat forks as separate labels, group to parent for display (stored later)
+      const forksMap = {
+        "North Fork Yuba River": "Yuba River",
+        "Middle Fork Yuba River": "Yuba River",
+        "South Fork Yuba River": "Yuba River"
+      };
       const chosen = [];
       const seen = new Set();
       for (const s of sites){
-        if (seen.has(s.label)) continue;
-        seen.add(s.label);
-        chosen.push(s);
+        const label = s.label;
+        if (seen.has(label)) continue;
+        seen.add(label);
+        chosen.push({ ...s, parent: forksMap[label] || label });
         if (chosen.length >= limit) break;
       }
 
@@ -860,6 +868,7 @@
           flies: bestFliesForSeason(),
           tailwater: tail,
           springFed: spring,
+          parent: s.parent,
           explain: buildExplain({tempC: d.tempC, cfs, factors})
         };
       }).sort((a,b) => b.score - a.score);
@@ -896,7 +905,7 @@
             <td>
               ${r.name}
               <div class="small">${r.siteName}</div>
-              <div class="meta">${species}</div>
+              <div class="meta">${species}${r.parent && r.parent !== r.name ? ` • <span class="small">(${r.parent})</span>` : ''}</div>
               <div class="small">Flies: ${r.flies.join(", ")}</div>
               <div class="small">${r.tailwater ? 'Tailwater' : (r.springFed ? 'Spring-fed' : '')}</div>
             </td>

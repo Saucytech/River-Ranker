@@ -24,6 +24,13 @@
     .small { font-size:12px; color:#666; }
     .meta { font-size:12px; color:#444; margin-top:4px; }
     .btn { display:inline-block; padding:6px 10px; margin:6px 6px 0 0; border:1px solid #333; text-decoration:none; border-radius:8px; font-size:13px; }
+    /* Modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display:none; align-items:center; justify-content:center; padding:16px; z-index:1000; }
+    .modal { background:#fff; color:#222; max-width:820px; width:100%; max-height:80vh; overflow:auto; border-radius:12px; padding:16px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+    .modal h2 { margin: 0 0 8px 0; font-size:18px; }
+    .modal h3 { margin: 16px 0 6px 0; font-size:15px; }
+    .modal p, .modal li { font-size:14px; line-height:1.45; color:#333; }
+    .modal .close { float:right; border:1px solid #333; border-radius:8px; padding:4px 8px; background:#fff; }
   </style>
 </head>
 <body>
@@ -31,6 +38,7 @@
     <h1>River Ranker</h1>
     <span class="pill" id="mode-pill">near me</span>
     <span class="pill" id="season-pill"></span>
+    <a href="#" id="how-link" class="btn" style="margin-left:auto;">How this works</a>
   </header>
 
   <div class="controls">
@@ -58,6 +66,45 @@
     <tbody></tbody>
   </table>
 
+  <!-- How it works modal -->
+  <div id="how-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="how-title">
+    <div class="modal">
+      <button class="close" id="how-close" aria-label="Close">Close</button>
+      <h2 id="how-title">How this works</h2>
+      <p>River Ranker is a scouting tool to help you quickly spot promising trout water near you. It is not a substitute for local knowledge, on-the-ground conditions, or official regulations.</p>
+      <h3>Where the data comes from</h3>
+      <ul>
+        <li><b>Flows and temperature:</b> Live readings from the USGS Water Services “Instantaneous Values (IV)” API. Some gages report only flow (CFS); temperature is included when the gage has a temp sensor.</li>
+        <li><b>Freshness:</b> The colored chip shows how recent the last flow reading is.</li>
+        <li><b>Fly shops:</b> Nearby shop info is looked up from OpenStreetMap data and may be incomplete.</li>
+      </ul>
+      <h3>How rivers are ranked</h3>
+      <ul>
+        <li><b>Flow suitability:</b> Prefers moderate flows typical for wade fishing on trout streams; very high water scores low.</li>
+        <li><b>Water temperature:</b> Favors roughly 52–62°F, and tapers above/below.</li>
+        <li><b>Distance:</b> Closer rivers score higher.</li>
+        <li><b>Data freshness:</b> More recent gage updates score higher.</li>
+        <li><b>Season:</b> A small seasonal adjustment is applied.</li>
+      </ul>
+      <p>Names are normalized and obviously non-trout waters (e.g., canals, reservoirs) are filtered out. This is a best‑effort heuristic and will not be perfect.</p>
+      <h3>Important limitations</h3>
+      <ul>
+        <li>Coverage is limited to California and gaged waters; ungaged creeks won’t appear.</li>
+        <li>Flows and temps can change quickly due to weather or dam operations; always verify current conditions.</li>
+        <li>Species and “best flies” are educated guesses based on region and season; treat as a starting point.</li>
+        <li>Regulations can change mid‑season. Always check the official CDFW regulations before you fish.</li>
+        <li>Use caution around water. High or swift flows can be dangerous even when a river looks good on the map.</li>
+      </ul>
+      <h3>Sources</h3>
+      <ul>
+        <li>USGS Water Services (IV): <a href="https://waterservices.usgs.gov/" target="_blank" rel="noopener">waterservices.usgs.gov</a></li>
+        <li>OpenStreetMap (shops): <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">openstreetmap.org</a></li>
+        <li>California fishing regulations (search): <a href="https://wildlife.ca.gov/Regulations" target="_blank" rel="noopener">wildlife.ca.gov/Regulations</a></li>
+      </ul>
+      <p class="small">This app does not store your location. Your approximate location is used locally to find nearby gages.</p>
+    </div>
+  </div>
+
   <script>
     // cache-bust service worker on dev reloads
     if ('serviceWorker' in navigator) {
@@ -66,8 +113,10 @@
     // Config
     const PARAM_FLOW = "00060";
     const PARAM_TEMP = "00010";
-    const SUMMER = (() => { const m = new Date().getMonth()+1; return m>=6 && m<=9; })();
-    document.getElementById('season-pill').textContent = SUMMER ? "summer boost on" : "neutral season";
+    const MONTH = new Date().getMonth()+1;
+    const SUMMER = MONTH>=6 && MONTH<=9;
+    const SEASON_LABEL = SUMMER ? "Summer" : (MONTH<=2 || MONTH===12 ? "Winter" : (MONTH<=5 ? "Spring" : "Fall"));
+    document.getElementById('season-pill').textContent = `Season: ${SEASON_LABEL}`;
 
     const FRESH = [
       { maxHrs: 1,    color: "#1db954", label: "live" },
@@ -78,7 +127,87 @@
     ];
 
     const SPECIES_ICON = { rainbow:"🟦", brown:"🟨", brook:"🟥", cutthroat:"🟧", steelhead:"🎯" };
+    const SPECIES_COLOR = { rainbow:"#4ea3ff", brown:"#b08968", brook:"#e63946", cutthroat:"#ff8c42", steelhead:"#6c757d" };
     const defaultSpecies = ["rainbow"];
+
+    // Device + map links
+    const UA = navigator.userAgent || "";
+    const IS_IOS = /iPad|iPhone|iPod/.test(UA) && !window.MSStream;
+    const IS_ANDROID = /Android/.test(UA);
+    function mapHrefFor(lat, lon, name){
+      const q = encodeURIComponent(name);
+      if (IS_IOS) return `https://maps.apple.com/?ll=${lat},${lon}&q=${q}`;
+      return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}%20(${q})`;
+    }
+
+    // Species heuristic (very rough) by location + season
+    function guessSpecies(lat, lon){
+      const coastal = lon > -124.3 && lon < -121.0; // CA coastal band
+      const farNorth = lat > 40.5;
+      const highSierra = lon > -121.5 && lat > 36 && lat < 40.5; // Sierra crest approximation
+      const species = new Set();
+      species.add("rainbow");
+      if (highSierra || farNorth) species.add("brook");
+      if (!highSierra) species.add("brown");
+      const winter = SEASON_LABEL === "Winter";
+      if (coastal && winter) species.add("steelhead");
+      return Array.from(species);
+    }
+
+    function speciesChips(keys){
+      return keys.map(k => `<span class="chip" style="background:${SPECIES_COLOR[k]||'#ddd'};color:#fff">${k}</span>`).join(" ");
+    }
+
+    function bestFliesForSeason(){
+      switch (SEASON_LABEL){
+        case "Winter": return ["midges", "BWO", "eggs (steelhead)", "stonefly nymphs"];
+        case "Spring": return ["March Brown", "BWO", "caddis", "stoneflies"];
+        case "Summer": return ["hoppers", "PMD", "caddis", "ants", "small streamers"];
+        case "Fall": default: return ["October Caddis", "BWO", "mahogany duns", "streamers"];
+      }
+    }
+
+    // Find nearest fly shop via OpenStreetMap Overpass API
+    async function fetchNearestFlyShop(lat, lon){
+      const radiusM = 80000; // 80 km
+      const query = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(`
+        [out:json][timeout:25];
+        (
+          node["shop"="fishing"](around:${radiusM},${lat},${lon});
+          node["shop"="outdoor"][name~"fly|fishing",i](around:${radiusM},${lat},${lon});
+          node["shop"="sports"][name~"fly|fishing",i](around:${radiusM},${lat},${lon});
+          way["shop"="fishing"](around:${radiusM},${lat},${lon});
+        );
+        out center 20;
+      `)}`;
+      try {
+        const res = await fetch(query);
+        if (!res.ok) return null;
+        const json = await res.json();
+        const elems = json.elements || [];
+        let best = null, bestDist = Infinity;
+        for (const e of elems){
+          const t = e.tags || {};
+          const flat = e.lat || e.center?.lat;
+          const flon = e.lon || e.center?.lon;
+          if (!isFinite(flat) || !isFinite(flon)) continue;
+          const d = distMi({lat, lon}, {lat: flat, lon: flon});
+          if (d < bestDist){
+            bestDist = d;
+            best = {
+              name: t.name || "Fly shop",
+              lat: flat, lon: flon,
+              phone: t["contact:phone"] || t.phone || null,
+              website: t["contact:website"] || t.website || null,
+              miles: Math.round(d)
+            };
+          }
+        }
+        return best;
+      } catch {
+        return null;
+      }
+    }
 
     function g(q){ return "https://www.google.com/search?q=" + encodeURIComponent(q); }
     function chatGPTUrl(prompt){ return `https://chatgpt.com/?q=${encodeURIComponent(prompt)}&hints=search`; }
@@ -95,8 +224,10 @@
     }
     function looksTrouty(name){
       const n = name.toUpperCase();
-      if (!/(RIVER|CREEK|FORK)/.test(n)) return false;
-      if (/(CANAL|SLOUGH|WASTEWAY|DIVERSION|WATERWAY|DRAIN)/.test(n)) return false;
+      // Must look like a flowing trout stream
+      if (!/(RIVER|CREEK|CRK|FORK|FORKS|BRANCH|RUN|TRIBUTARY|TRIB)/.test(n)) return false;
+      // Exclusions: man-made/slow/still waters
+      if (/(CANAL|DITCH|SLOUGH|WASTEWAY|DIVERSION|WATERWAY|DRAIN|RESERVOIR|LAKE|BAY|ESTERO|ESTUARY|AQUEDUCT|WASH|OUTFALL)/.test(n)) return false;
       return true;
     }
 
@@ -112,11 +243,36 @@
     }
     function fishabilityScore(cfs){
       if (!isFinite(cfs) || cfs <= 0) return 0;
-      if (cfs < 60) return 0.2;
-      if (cfs < 150) return 0.8;
-      if (cfs < 400) return 1.0;
+      // Very high flows are generally unsafe for trout wading except big steelhead rivers
+      if (cfs > 15000) return 0.05;
+      // Piecewise preferences (small/med trout streams)
+      if (cfs < 40) return 0.15;
+      if (cfs < 120) return 0.8;
+      if (cfs < 350) return 1.0;
       if (cfs < 900) return 0.7;
-      if (cfs < 1500) return 0.5;
+      if (cfs < 1500) return 0.45;
+      return 0.3;
+    }
+
+    function tempTroutScore(tempC){
+      if (!isFinite(tempC)) return 0.6; // unknown: neutral-ish
+      const F = tempC*9/5+32;
+      // Ideal band ~52-62F; taper outside
+      if (F >= 52 && F <= 62) return 1.0;
+      if (F <= 38) return 0.2;
+      if (F >= 70) return 0.05;
+      if (F < 52) return Math.max(0.2, 1 - (52 - F)/20); // linear down to 32F
+      // F > 62
+      return Math.max(0.05, 1 - (F - 62)/12); // linear down to 74F
+    }
+
+    function freshnessScore(ts){
+      const hrs = ageHours(ts);
+      if (!isFinite(hrs)) return 0.3;
+      if (hrs <= 6) return 1.0;
+      if (hrs <= 24) return 0.9;
+      if (hrs <= 72) return 0.7;
+      if (hrs <= 168) return 0.5;
       return 0.3;
     }
     function seasonScore(tailwater){
@@ -404,9 +560,12 @@
         const d = data[s.siteCode] || {};
         const cfs = isFinite(d.cfs) ? Math.round(d.cfs) : null;
         const f = fishabilityScore(d.cfs);
+        const tscore = tempTroutScore(d.tempC);
         const ds = Math.max(0, 1 - Math.min(s.dist, 300)/300);
-        const ss = seasonScore(false); // unknown tailwater status in pure dynamic mode
-        const score = 0.5*f + 0.3*ds + 0.2*ss;
+        const fs = freshnessScore(d.flowTime);
+        const ss = seasonScore(false);
+        // Weighted composite optimized for trout seeking: flow, temp, distance, freshness, season
+        const score = 0.45*f + 0.25*tscore + 0.15*ds + 0.1*fs + 0.05*ss;
         return {
           name: s.label,
           siteName: s.siteName,
@@ -414,7 +573,8 @@
           miles: Math.round(s.dist),
           cfs, flowTime: d.flowTime || null, tempC: d.tempC,
           score: round2(score),
-          species: defaultSpecies
+          species: guessSpecies(s.lat, s.lon),
+          flies: bestFliesForSeason()
         };
       }).sort((a,b) => b.score - a.score);
 
@@ -422,32 +582,60 @@
       tbody.innerHTML = rows.map((r, i) => {
         const fresh = freshnessChip(r.flowTime);
         const temp = tempBadge(r.tempC);
-        const species = r.species.map(k => SPECIES_ICON[k] || "🐟").join(" ");
+        const species = speciesChips(r.species);
         const askHref = chatGPTUrl(buildRegsPrompt(r.name, r.siteName));
         const regsHref = g(`${r.name} fishing regulations site:wildlife.ca.gov`);
+        const mapHref = mapHrefFor(r.lat, r.lon, r.name);
         return `
           <tr>
             <td>${i+1}</td>
             <td>
               ${r.name}
               <div class="small">${r.siteName}</div>
-              <div class="meta">${species} • ${SUMMER ? "summer" : "shoulder"} season</div>
+              <div class="meta">${species}</div>
+              <div class="small">Flies: ${r.flies.join(", ")}</div>
             </td>
             <td>${r.cfs ?? "n/a"}<div class="small">${fresh}</div><div class="small" style="margin-top:4px;">${temp}</div></td>
             <td>${r.miles}</td>
             <td>${r.score}</td>
             <td>
-              <a class="btn" href="https://maps.apple.com/?ll=${r.lat},${r.lon}&q=${encodeURIComponent(r.name)}">Map</a>
+              <a class="btn" href="${mapHref}" target="_blank" rel="noopener">Map</a>
               <a class="btn" href="${regsHref}" target="_blank" rel="noopener">Regs</a>
               <a class="btn" href="${askHref}" target="_blank" rel="noopener">Ask GPT</a>
+              <span class="small" id="fly-${i}">Fly shop: loading…</span>
             </td>
           </tr>
         `;
       }).join("");
       statusEl.textContent = `${rows.length} rivers within ${radius} mi`;
+
+      // Fetch nearest fly shop details per row asynchronously and update DOM
+      rows.forEach(async (r, i) => {
+        const el = document.getElementById(`fly-${i}`);
+        if (!el) return;
+        const shop = await fetchNearestFlyShop(r.lat, r.lon);
+        if (!shop){
+          el.textContent = 'Fly shop: n/a';
+          return;
+        }
+        const map = mapHrefFor(shop.lat, shop.lon, shop.name);
+        const phone = shop.phone ? ` • ${shop.phone}` : '';
+        const site = shop.website ? ` • <a href="${shop.website}" target="_blank" rel="noopener">site</a>` : '';
+        el.innerHTML = `Fly shop: <a href="${map}" target="_blank" rel="noopener">${shop.name}</a> (${shop.miles} mi)${phone}${site}`;
+      });
     }
 
     document.getElementById('refresh').addEventListener('click', build);
+
+    // How it works modal logic
+    const howLink = document.getElementById('how-link');
+    const howModal = document.getElementById('how-modal');
+    const howClose = document.getElementById('how-close');
+    function openHow(){ howModal.style.display = 'flex'; }
+    function closeHow(){ howModal.style.display = 'none'; }
+    howLink.addEventListener('click', (e)=>{ e.preventDefault(); openHow(); });
+    howClose.addEventListener('click', closeHow);
+    howModal.addEventListener('click', (e)=>{ if (e.target === howModal) closeHow(); });
 
     // PWA install
     if ("serviceWorker" in navigator){

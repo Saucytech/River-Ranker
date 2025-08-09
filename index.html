@@ -46,6 +46,9 @@
     <label>Max rivers <input id="limit" type="number" min="5" max="50" step="5" value="25"></label>
     <button id="refresh">Refresh</button>
     <span class="small" id="origin"></span>
+    <label class="small"><input type="checkbox" id="hasTempOnly"> Has temp only</label>
+    <label class="small"><input type="checkbox" id="hideWarm"> Hide warm (>68°F)</label>
+    <button id="download-json" class="btn">Download JSON</button>
   </div>
   <div class="small" id="status"></div>
 
@@ -123,21 +126,66 @@
       { maxHrs: 24,   color: "#75d696", label: "<24h" },
       { maxHrs: 72,   color: "#ffdd57", label: "24–72h" },
       { maxHrs: 168,  color: "#ffa141", label: "72h–1w" },
-      { maxHrs: Infinity, color: "#ff5d5d", label: ">1w" }
+      { maxHrs: Infinity, color: "#ff5d5d", label: ">1w (drop)" }
     ];
 
     const SPECIES_ICON = { rainbow:"🟦", brown:"🟨", brook:"🟥", cutthroat:"🟧", steelhead:"🎯" };
     const SPECIES_COLOR = { rainbow:"#4ea3ff", brown:"#b08968", brook:"#e63946", cutthroat:"#ff8c42", steelhead:"#6c757d" };
     const defaultSpecies = ["rainbow"];
 
+    // Whitelists and name guards (CA focus, non-exhaustive)
+    const TROUT_RIVER_WHITELIST = new Set([
+      "Sacramento River", "American River", "Feather River", "Yuba River", "Truckee River",
+      "McCloud River", "Pit River", "Owens River", "Lower Owens River", "Upper Owens River",
+      "Kern River", "Kings River", "San Joaquin River", "Stanislaus River", "Tuolumne River",
+      "Merced River", "Trinity River", "Klamath River", "Smith River", "Mattole River",
+      "Eel River", "Russian River", "Fall River", "Hat Creek", "Putah Creek", "Upper Sacramento River"
+    ]);
+    const TROUT_CREEK_WHITELIST = new Set([
+      "Hat Creek", "Putah Creek", "Hot Creek", "Silver Creek", "Rush Creek", "Lee Vining Creek",
+      "Upper Truckee River", "Mammoth Creek", "Big Pine Creek", "Bishop Creek"
+    ]);
+    const LARGE_TAILWATER_WHITELIST = new Set([
+      "Sacramento River", "American River", "Feather River", "Trinity River", "Klamath River"
+    ]);
+    const SPRINGFED_WHITELIST = new Set(["Fall River", "Hat Creek"]);
+    const STEELHEAD_RIVERS = new Set(["Russian River", "American River", "Trinity River", "Klamath River", "Eel River", "Smith River"]);
+    const EXTRA_EXCLUDE = /\b(Byron|Middle River|Old River|False River|Forebay|Franks\s+Tract|Clifton\s+Court|Andrus\s+Island)\b/i;
+
+    // Optimization guide additions
+    const WARM_WATER_LIST = new Set([
+      "Guadalupe River", "Salinas River", "Napa River", "Pajaro River", "San Benito River",
+      "San Antonio River", "Nacimiento River", "Cosumnes River", "Bear River", "San Lorenzo River",
+      "Lower American River", "Russian River"
+    ]);
+    // Approximate ideal flows (cfs) for some rivers; fallback to 30d median otherwise
+    const IDEAL_FLOW = new Map([
+      ["Truckee River", 400],
+      ["Little Truckee River", 150],
+      ["McCloud River", 400],
+      ["Upper Sacramento River", 350],
+      ["Pit River", 600],
+      ["Feather River", 1200],
+      ["American River", 1200],
+      ["Yuba River", 900],
+      ["Sacramento River", 6000],
+      ["Putah Creek", 250],
+      ["Hat Creek", 200]
+    ]);
+    // Hatch data (starter; extend over time)
+    const HATCH_DATA = {
+      "Truckee River": { 8:["PMD","Caddis","Terrestrials"], 9:["BWO","Oktober Caddis"] },
+      "McCloud River": { 8:["Caddis","Little Yellow Stones"], 9:["BWO"] },
+      "Hat Creek": { 8:["Caddis","PMD"], 9:["BWO"] }
+    };
+
     // Device + map links
     const UA = navigator.userAgent || "";
     const IS_IOS = /iPad|iPhone|iPod/.test(UA) && !window.MSStream;
     const IS_ANDROID = /Android/.test(UA);
-    function mapHrefFor(lat, lon, name){
-      const q = encodeURIComponent(name);
-      if (IS_IOS) return `https://maps.apple.com/?ll=${lat},${lon}&q=${q}`;
-      return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}%20(${q})`;
+    function mapHrefFor(lat, lon){
+      if (IS_IOS) return `https://maps.apple.com/?ll=${lat},${lon}`;
+      return `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
     }
 
     // Species heuristic (very rough) by location + season
@@ -218,16 +266,33 @@
 
     function titleCase(s){ return s.toLowerCase().replace(/\b([a-z])/g, m => m.toUpperCase()); }
     function normalizeRiverName(siteName){
-      const nice = titleCase(siteName.replace(/\bR\b/g,"River").replace(/\bRiv\b/gi,"River").replace(/\bCr\b/gi,"Creek").replace(/\bNr\b/gi,"near").replace(/\bAt\b/gi,"at").replace(/\s+/g," ").trim());
-      const m = nice.match(/([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\s(River|Creek)/);
-      return m ? `${m[1]} ${m[2]}` : nice.split(" ").slice(0,3).join(" ");
+      const s = siteName
+        .replace(/\bR\b/ig, "River")
+        .replace(/\bRiv\b/ig, "River")
+        .replace(/\bCr\b/ig, "Creek")
+        .replace(/\s+/g, " ")
+        .trim();
+      // Pattern 1: North Fork Yuba River (keep full fork+river)
+      const p1 = s.match(/((?:North|South|Middle|East|West|Little)\sFork\s[A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s(River|Creek)/i);
+      if (p1) return `${p1[1]} ${p1[2]}`.replace(/\s+/g,' ').trim();
+      // Pattern 2: <Name> River|Creek (generic)
+      const p2 = s.match(/([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s(River|Creek)/i);
+      if (p2) return `${p2[1]} ${p2[2]}`;
+      // Pattern 3: <Name> Fork
+      const p3 = s.match(/([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\sFork/i);
+      if (p3) return `${p3[1]} Fork`;
+      return s.split(" ").slice(0,3).join(" ");
     }
+    const INCLUDE = /\b(River|Creek|Fork|Run|Brook|Branch|Headwaters)\b/i;
+    const EXCLUDE = /\b(Canal|Slough|Ditch|Drain|Diversion|Aqueduct|Wastewater|Effluent|Outfall|Estuary|Tidal|Delta|Lagoon|Pond|Lake|Reservoir|Island)\b/i;
     function looksTrouty(name){
-      const n = name.toUpperCase();
-      // Must look like a flowing trout stream
-      if (!/(RIVER|CREEK|CRK|FORK|FORKS|BRANCH|RUN|TRIBUTARY|TRIB)/.test(n)) return false;
-      // Exclusions: man-made/slow/still waters
-      if (/(CANAL|DITCH|SLOUGH|WASTEWAY|DIVERSION|WATERWAY|DRAIN|RESERVOIR|LAKE|BAY|ESTERO|ESTUARY|AQUEDUCT|WASH|OUTFALL)/.test(n)) return false;
+      if (!INCLUDE.test(name)) return false;
+      if (EXCLUDE.test(name) && !/\b(Dam|Tailwater|Outlet)\b/i.test(name)) return false;
+      if (EXTRA_EXCLUDE.test(name)) return false;
+      if (/\b(at|near)\s+mouth\b/i.test(name)) return false;
+      // exclude generic creeks unless whitelisted
+      const label = normalizeRiverName(name);
+      if (/\bCreek\b/i.test(label) && !TROUT_CREEK_WHITELIST.has(label)) return false;
       return true;
     }
 
@@ -254,16 +319,24 @@
       return 0.3;
     }
 
-    function tempTroutScore(tempC){
-      if (!isFinite(tempC)) return 0.6; // unknown: neutral-ish
+    // Fishability from 30d ratio (if available)
+    function fishabilityFromRatio(ratio){
+      if (!isFinite(ratio) || ratio <= 0) return 0;
+      if (ratio < 0.25) return 0.2;
+      if (ratio < 0.6)  return 0.6;
+      if (ratio <= 1.5) return 1.0;
+      if (ratio <= 2.5) return 0.7;
+      return 0.4;
+    }
+
+    function tempGate(tempC){
+      if (!isFinite(tempC)) return { drop:false, penalty:0, bonus:0, scoreHint:0.6 };
       const F = tempC*9/5+32;
-      // Ideal band ~52-62F; taper outside
-      if (F >= 52 && F <= 62) return 1.0;
-      if (F <= 38) return 0.2;
-      if (F >= 70) return 0.05;
-      if (F < 52) return Math.max(0.2, 1 - (52 - F)/20); // linear down to 32F
-      // F > 62
-      return Math.max(0.05, 1 - (F - 62)/12); // linear down to 74F
+      if (F > 72) return { drop:true, penalty:1, bonus:0, scoreHint:0 };
+      if (F > 68) return { drop:false, penalty:0.05, bonus:0, scoreHint:0.4 };
+      if (F >= 52 && F <= 62) return { drop:false, penalty:0, bonus:0.05, scoreHint:1.0 };
+      if (F <= 38) return { drop:false, penalty:0, bonus:0, scoreHint:0.2 };
+      return { drop:false, penalty:0, bonus:0, scoreHint:0.7 };
     }
 
     function freshnessScore(ts){
@@ -291,6 +364,10 @@
       if (!isFinite(t)) return Infinity;
       return (Date.now() - t) / 3.6e6;
     }
+    function isFreshEnough(ts){
+      const hrs = ageHours(ts);
+      return isFinite(hrs) && hrs <= 24*7;
+    }
     function freshnessChip(ts){
       const hrs = ageHours(ts);
       let meta = FRESH[FRESH.length-1];
@@ -311,6 +388,42 @@
     }
 
     function regsUrl(label){ return g(`${label} fishing regulations site:wildlife.ca.gov`); }
+
+    function buildExplain({tempC, cfs, factors}){
+      const parts = [];
+      if (isFinite(tempC)){
+        const F = Math.round(tempC*9/5+32);
+        if (F > 68) parts.push(`Temp ${F}°F – warm`);
+        else if (F >= 52 && F <= 62) parts.push(`Temp ${F}°F – ideal`);
+        else parts.push(`Temp ${F}°F`);
+      } else {
+        parts.push('Temp n/a');
+      }
+      if (isFinite(cfs)){
+        if (cfs > 5000) parts.push(`Flow ${cfs} cfs – high`);
+        else parts.push(`Flow ${cfs} cfs`);
+      } else {
+        parts.push('Flow n/a');
+      }
+      const f = factors || {};
+      if (f.temp && f.temp !== 1) parts.push(`temp×${f.temp}`);
+      if (f.flow && f.flow !== 1) parts.push(`flow×${f.flow}`);
+      if (f.season && f.season !== 1) parts.push(`season×${f.season}`);
+      if (f.fresh && f.fresh !== 1) parts.push(`fresh×${f.fresh}`);
+      if (f.elev && f.elev !== 1) parts.push(`elev×${f.elev}`);
+      return parts.join(' • ');
+    }
+
+    function inferTailwater(label, siteName){
+      const n = `${label} ${siteName||""}`.toLowerCase();
+      if (/(tailwater|below dam|dam|outlet|powerhouse|reservoir)/.test(n)) return true;
+      return LARGE_TAILWATER_WHITELIST.has(label);
+    }
+    function isSpringFed(label){
+      if (SPRINGFED_WHITELIST.has(label)) return true;
+      return /spring/.test(label.toLowerCase()) || label === 'Fall River' || label === 'Hat Creek';
+    }
+    function isSteelheadRiver(label){ return STEELHEAD_RIVERS.has(label); }
 
     async function getOrigin(){
       const HOME = { lat: 37.0897, lon: -122.089 };
@@ -517,6 +630,120 @@
       return out;
     }
 
+    // Fetch 30-day IV history per site to compute median CFS (small batch, limited concurrency)
+    async function fetchMedian30d(ids){
+      const out = {};
+      let idx = 0;
+      const maxConcurrency = 4;
+      async function worker(){
+        while (idx < ids.length){
+          const i = idx++;
+          const id = ids[i];
+          const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&parameterCd=${PARAM_FLOW}&sites=${id}&period=P30D`;
+          try{
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const json = await res.json();
+            const series = json?.value?.timeSeries?.[0];
+            const vals = series?.values?.[0]?.value || [];
+            const nums = vals.map(v => Number(v.value)).filter(x => isFinite(x) && x > 0);
+            if (nums.length){
+              const sorted = nums.sort((a,b)=>a-b);
+              const mid = Math.floor(sorted.length/2);
+              const med = sorted.length % 2 ? sorted[mid] : (sorted[mid-1] + sorted[mid]) / 2;
+              out[id] = med;
+            }
+          }catch{}
+        }
+      }
+      const workers = Array.from({length: Math.min(maxConcurrency, ids.length)}, () => worker());
+      await Promise.all(workers);
+      return out;
+    }
+
+    // Elevation lookup (meters) using Open-Elevation; caches in localStorage
+    async function fetchElevations(sites){
+      const out = {};
+      const need = [];
+      for (const s of sites){
+        const key = `elv:${s.lat.toFixed(3)},${s.lon.toFixed(3)}`;
+        const cached = localStorage.getItem(key);
+        if (cached){ out[s.siteCode] = Number(cached); continue; }
+        need.push({s,key});
+      }
+      if (!need.length) return out;
+      // batch up to 100 locations
+      for (let i=0;i<need.length;i+=100){
+        const slice = need.slice(i,i+100);
+        const qs = slice.map(x => `${x.s.lat},${x.s.lon}`).join("|");
+        const url = `https://api.open-elevation.com/api/v1/lookup?locations=${qs}`;
+        try{
+          const res = await fetch(url);
+          if (!res.ok) continue;
+          const json = await res.json();
+          const results = json?.results || [];
+          results.forEach((r, idx) => {
+            const {s,key} = slice[idx] || {};
+            if (!s) return;
+            const m = Number(r.elevation);
+            if (isFinite(m)){
+              out[s.siteCode] = m; localStorage.setItem(key, String(m));
+            }
+          });
+        }catch{}
+      }
+      return out;
+    }
+
+    // Multipliers
+    function tempFactor(tempC, label, isWhitelisted){
+      // warmwater list heavy penalty
+      if (WARM_WATER_LIST.has(label)) return 0.1;
+      if (!isFinite(tempC)){
+        if (SUMMER && !isWhitelisted) return 0.5;
+        return isWhitelisted ? 1.0 : 0.8;
+      }
+      const F = tempC*9/5+32;
+      if (F > 65) return 0.6;
+      if (F > 60) return 0.9;
+      if (F >= 50 && F <= 60) return 1.0;
+      if (F < 40 && !WARM_WATER_LIST.has(label)) return 0.8;
+      return 1.0;
+    }
+    function flowFactor(cfs, label, tailwater){
+      if (!isFinite(cfs) || cfs <= 0) return (TROUT_RIVER_WHITELIST.has(label)||TROUT_CREEK_WHITELIST.has(label)) ? 1.0 : 0.5;
+      // hide below 10cfs unless spring-fed handled elsewhere; here penalty
+      if (cfs < 10) return 0.5;
+      if (cfs > 5000 && !(tailwater && LARGE_TAILWATER_WHITELIST.has(label))) return 0.25;
+      return 1.0;
+    }
+    function seasonFactor(label, tailwater, springFed){
+      if (MONTH>=6 && MONTH<=9){
+        if (tailwater || springFed) return 1.0;
+        return 0.6;
+      }
+      if (MONTH===11 || MONTH<=2){
+        if (isSteelheadRiver(label)) return 1.1;
+      }
+      return 0.5;
+    }
+    function freshnessFactor(ts){
+      const hrs = ageHours(ts);
+      if (!isFinite(hrs)) return 0.5;
+      if (hrs <= 1) return 1.0;
+      if (hrs <= 24) return 0.9;
+      if (hrs <= 72) return 0.7;
+      if (hrs <= 168) return 0.5;
+      return 0.2; // caller may still drop >7d
+    }
+    function elevationFactor(label, elevMeters){
+      const elevFt = isFinite(elevMeters) ? elevMeters*3.28084 : null;
+      if (elevFt !== null && elevFt < 1500 && !TROUT_RIVER_WHITELIST.has(label) && !TROUT_CREEK_WHITELIST.has(label)){
+        return 0.6; // heavily penalize lowland non-whitelist
+      }
+      return 1.0;
+    }
+
     async function build(){
       const radius = Number(document.getElementById('radius').value || 250);
       const limit = Number(document.getElementById('limit').value || 25);
@@ -554,38 +781,92 @@
       }
 
       const ids = chosen.map(s => s.siteCode);
-      const data = await fetchFlowAndTemp(ids);
+      const [data, elevations, med30] = await Promise.all([
+        fetchFlowAndTemp(ids),
+        fetchElevations(chosen),
+        fetchMedian30d(ids)
+      ]);
 
+      const hasTempOnly = document.getElementById('hasTempOnly').checked;
+      const hideWarm = document.getElementById('hideWarm').checked;
       const rows = chosen.map(s => {
         const d = data[s.siteCode] || {};
         const cfs = isFinite(d.cfs) ? Math.round(d.cfs) : null;
-        const f = fishabilityScore(d.cfs);
-        const tscore = tempTroutScore(d.tempC);
+        const tail = inferTailwater(s.label, s.siteName);
+        const spring = isSpringFed(s.label);
+        const tempMeta = tempGate(d.tempC);
+        let f = fishabilityScore(d.cfs);
+        const median = med30[s.siteCode];
+        if (isFinite(d.cfs) && isFinite(median) && median > 0){
+          const ratio = d.cfs / median;
+          f = fishabilityFromRatio(ratio);
+          // Clamp high flow non-large-tailwater
+          if (d.cfs > 5000 && !(tail && LARGE_TAILWATER_WHITELIST.has(s.label))){
+            f = Math.min(f, 0.25);
+          }
+        }
         const ds = Math.max(0, 1 - Math.min(s.dist, 300)/300);
         const fs = freshnessScore(d.flowTime);
-        const ss = seasonScore(false);
-        // Weighted composite optimized for trout seeking: flow, temp, distance, freshness, season
-        const score = 0.45*f + 0.25*tscore + 0.15*ds + 0.1*fs + 0.05*ss;
+        const seasonF = seasonFactor(s.label, tail, spring);
+        // multiplicative factors per spec
+        const factors = {
+          temp: tempFactor(d.tempC, s.label, TROUT_RIVER_WHITELIST.has(s.label)||TROUT_CREEK_WHITELIST.has(s.label)),
+          flow: flowFactor(cfs, s.label, tail),
+          season: seasonF,
+          fresh: freshnessFactor(d.flowTime),
+          elev: elevationFactor(s.label, elevations[s.siteCode])
+        };
+        // base (add whitelist bonus)
+        let base = 0.5*f + 0.3*ds + 0.2*seasonScore(tail);
+        if (TROUT_RIVER_WHITELIST.has(s.label) || TROUT_CREEK_WHITELIST.has(s.label)) base *= 1.2;
+        if (isFinite(d.tempC) && d.tempC*9/5+32 > 68) base = Math.min(base, 0.4);
+        const final = base * factors.temp * factors.flow * factors.season * factors.fresh * factors.elev;
+        // Hatch multiplier (simple presence-based bonus)
+        let hatchBonus = 1.0;
+        const hatch = HATCH_DATA[s.label];
+        if (hatch && hatch[MONTH]) hatchBonus = 1.05;
+        const scored = Math.max(0, Math.min(1, final)) * hatchBonus;
         return {
           name: s.label,
           siteName: s.siteName,
           lat: s.lat, lon: s.lon,
           miles: Math.round(s.dist),
           cfs, flowTime: d.flowTime || null, tempC: d.tempC,
-          score: round2(score),
+          score: round2(scored),
           species: guessSpecies(s.lat, s.lon),
-          flies: bestFliesForSeason()
+          flies: bestFliesForSeason(),
+          tailwater: tail,
+          springFed: spring,
+          explain: buildExplain({tempC: d.tempC, cfs, factors})
         };
       }).sort((a,b) => b.score - a.score);
 
+      // Apply post-filters
+      const filtered = rows.filter(r => {
+        // freshness
+        if (!isFreshEnough(r.flowTime)) return false;
+        // temp toggles and hard summer drop
+        const F = isFinite(r.tempC) ? (r.tempC*9/5+32) : null;
+        if (SUMMER && F !== null && F > 70) return false;
+        if (hideWarm && F !== null && F > 68) return false;
+        // has temp only toggle
+        if (hasTempOnly && !isFinite(r.tempC)) return false;
+        // low flow exclusions per refinement
+        if (r.cfs !== null && r.cfs <= 0) return false;
+        if (r.cfs !== null && r.cfs < 1) return false;
+        if (r.cfs !== null && r.cfs < 5 && !r.tailwater) return false;
+        // low elevation summer penalty handled in scoring; here allow
+        return true;
+      });
+
       const tbody = document.querySelector("#table tbody");
-      tbody.innerHTML = rows.map((r, i) => {
+      tbody.innerHTML = filtered.map((r, i) => {
         const fresh = freshnessChip(r.flowTime);
         const temp = tempBadge(r.tempC);
         const species = speciesChips(r.species);
         const askHref = chatGPTUrl(buildRegsPrompt(r.name, r.siteName));
         const regsHref = g(`${r.name} fishing regulations site:wildlife.ca.gov`);
-        const mapHref = mapHrefFor(r.lat, r.lon, r.name);
+        const mapHref = mapHrefFor(r.lat, r.lon);
         return `
           <tr>
             <td>${i+1}</td>
@@ -594,10 +875,11 @@
               <div class="small">${r.siteName}</div>
               <div class="meta">${species}</div>
               <div class="small">Flies: ${r.flies.join(", ")}</div>
+              <div class="small">${r.tailwater ? 'Tailwater' : (r.springFed ? 'Spring-fed' : '')}</div>
             </td>
             <td>${r.cfs ?? "n/a"}<div class="small">${fresh}</div><div class="small" style="margin-top:4px;">${temp}</div></td>
             <td>${r.miles}</td>
-            <td>${r.score}</td>
+            <td title="${r.explain}">${r.score}</td>
             <td>
               <a class="btn" href="${mapHref}" target="_blank" rel="noopener">Map</a>
               <a class="btn" href="${regsHref}" target="_blank" rel="noopener">Regs</a>
@@ -607,10 +889,13 @@
           </tr>
         `;
       }).join("");
-      statusEl.textContent = `${rows.length} rivers within ${radius} mi`;
+      statusEl.textContent = `${filtered.length} rivers within ${radius} mi`;
+
+      // Persist current results for download
+      window.__riverRankerResults = filtered;
 
       // Fetch nearest fly shop details per row asynchronously and update DOM
-      rows.forEach(async (r, i) => {
+      filtered.forEach(async (r, i) => {
         const el = document.getElementById(`fly-${i}`);
         if (!el) return;
         const shop = await fetchNearestFlyShop(r.lat, r.lon);
@@ -618,7 +903,7 @@
           el.textContent = 'Fly shop: n/a';
           return;
         }
-        const map = mapHrefFor(shop.lat, shop.lon, shop.name);
+        const map = mapHrefFor(shop.lat, shop.lon);
         const phone = shop.phone ? ` • ${shop.phone}` : '';
         const site = shop.website ? ` • <a href="${shop.website}" target="_blank" rel="noopener">site</a>` : '';
         el.innerHTML = `Fly shop: <a href="${map}" target="_blank" rel="noopener">${shop.name}</a> (${shop.miles} mi)${phone}${site}`;
@@ -626,6 +911,31 @@
     }
 
     document.getElementById('refresh').addEventListener('click', build);
+    document.getElementById('download-json').addEventListener('click', () => {
+      try {
+        const data = JSON.stringify({
+          generatedAt: new Date().toISOString(),
+          origin: document.getElementById('origin').textContent,
+          season: document.getElementById('season-pill').textContent,
+          radiusMi: Number(document.getElementById('radius').value || 0),
+          limit: Number(document.getElementById('limit').value || 0),
+          hasTempOnly: document.getElementById('hasTempOnly').checked,
+          hideWarm: document.getElementById('hideWarm').checked,
+          rows: (window.__riverRankerResults || [])
+        }, null, 2);
+        const blob = new Blob([data], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `river-ranker-${Date.now()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('Could not generate JSON export.');
+      }
+    });
 
     // How it works modal logic
     const howLink = document.getElementById('how-link');

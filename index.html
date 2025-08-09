@@ -27,6 +27,13 @@
     .small { font-size:12px; color:#666; }
     .meta { font-size:12px; color:#444; margin-top:4px; }
     .btn { display:inline-block; padding:6px 10px; margin:6px 6px 0 0; border:1px solid #333; text-decoration:none; border-radius:8px; font-size:13px; }
+    details.dropdown { display:inline-block; position:relative; }
+    details.dropdown > summary { list-style:none; cursor:pointer; }
+    details.dropdown > summary::-webkit-details-marker { display:none; }
+    details.dropdown[open] > .menu { display:block; }
+    .menu { display:none; position:absolute; top:100%; left:0; background:#fff; border:1px solid #ccc; border-radius:8px; padding:6px; min-width:220px; z-index:20; box-shadow:0 4px 16px rgba(0,0,0,0.15); }
+    .menu a { display:block; padding:6px 8px; font-size:13px; color:#111; text-decoration:none; border-radius:6px; }
+    .menu a:hover { background:#f2f2f2; }
     /* Modal */
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display:none; align-items:center; justify-content:center; padding:16px; z-index:1000; }
     .modal { background:#fff; color:#222; max-width:820px; width:100%; max-height:80vh; overflow:auto; border-radius:12px; padding:16px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
@@ -219,50 +226,19 @@
       }
     }
 
-    // Find nearest fly shop via OpenStreetMap Overpass API
-    async function fetchNearestFlyShop(lat, lon){
-      const radiusM = 80000; // 80 km
-      const query = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(`
-        [out:json][timeout:25];
-        (
-          node["shop"="fishing"](around:${radiusM},${lat},${lon});
-          node["shop"="outdoor"][name~"fly|fishing",i](around:${radiusM},${lat},${lon});
-          node["shop"="sports"][name~"fly|fishing",i](around:${radiusM},${lat},${lon});
-          way["shop"="fishing"](around:${radiusM},${lat},${lon});
-        );
-        out center 20;
-      `)}`;
-      try {
-        const res = await fetch(query);
-        if (!res.ok) return null;
-        const json = await res.json();
-        const elems = json.elements || [];
-        let best = null, bestDist = Infinity;
-        for (const e of elems){
-          const t = e.tags || {};
-          const flat = e.lat || e.center?.lat;
-          const flon = e.lon || e.center?.lon;
-          if (!isFinite(flat) || !isFinite(flon)) continue;
-          const d = distMi({lat, lon}, {lat: flat, lon: flon});
-          if (d < bestDist){
-            bestDist = d;
-            best = {
-              name: t.name || "Fly shop",
-              lat: flat, lon: flon,
-              phone: t["contact:phone"] || t.phone || null,
-              website: t["contact:website"] || t.website || null,
-              miles: Math.round(d)
-            };
-          }
-        }
-        return best;
-      } catch {
-        return null;
-      }
-    }
+    // Fly shop lookup removed per product decision
 
     function g(q){ return "https://www.google.com/search?q=" + encodeURIComponent(q); }
     function chatGPTUrl(prompt){ return `https://chatgpt.com/?q=${encodeURIComponent(prompt)}&hints=search`; }
+    function buildSuggestedFliesPrompt(riverName){
+      const today = new Date();
+      const dateStr = today.toLocaleDateString();
+      return `You are an expert fly fishing guide. Suggest fly patterns (dry, nymph, streamer, terrestrials) for trout on ${riverName} in California for ${dateStr} in the ${SEASON_LABEL} season. Include sizes and brief when/where to fish them. Keep it concise and actionable.`;
+    }
+    function buildLocalShopsPrompt(lat, lon){
+      const today = new Date().toLocaleDateString();
+      return `List nearby fly shops for fly fishing near coordinates ${lat}, ${lon} in California as of ${today}. Provide name, distance, address, and phone. Keep to the closest 5 and include links if available.`;
+    }
 
     function buildRegsPrompt(riverName, siteName){
       return `Search the web and provide the most current and up-to-date fishing regulations specifically for trout on ${riverName} near "${siteName}" in California. Include season dates, gear restrictions (artificials, barbless), bag and possession limits, special closures or exceptions, and any catch-and-release rules. Cite and link the official CDFW page(s) you used. Keep it concise and actionable.`;
@@ -806,12 +782,13 @@
       };
       const chosen = [];
       const seen = new Set();
+      const maxCandidates = Math.max(limit * 3, 150);
       for (const s of sites){
         const label = s.label;
         if (seen.has(label)) continue;
         seen.add(label);
         chosen.push({ ...s, parent: forksMap[label] || label });
-        if (chosen.length >= limit) break;
+        if (chosen.length >= maxCandidates) break;
       }
 
       const ids = chosen.map(s => s.siteCode);
@@ -877,7 +854,7 @@
       }).sort((a,b) => b.score - a.score);
 
       // Apply post-filters
-      const filtered = rows.filter(r => {
+      let filtered = rows.filter(r => {
         // freshness
         if (!isFreshEnough(r.flowTime)) return false;
         // temp toggles and hard summer drop
@@ -893,13 +870,14 @@
         // low elevation summer penalty handled in scoring; here allow
         return true;
       });
+      // enforce user limit after filtering
+      filtered = filtered.slice(0, limit);
 
       const tbody = document.querySelector("#table tbody");
       tbody.innerHTML = filtered.map((r, i) => {
         const fresh = freshnessChip(r.flowTime);
         const temp = tempBadge(r.tempC);
         const species = speciesChips(r.species);
-        const askHref = chatGPTUrl(buildRegsPrompt(r.name, r.siteName));
         const regsHref = g(`${r.name} fishing regulations site:wildlife.ca.gov`);
         const mapHref = mapHrefFor(r.lat, r.lon);
         return `
@@ -921,8 +899,14 @@
             <td>
               <a class="btn" href="${mapHref}" target="_blank" rel="noopener">Map</a>
               <a class="btn" href="${regsHref}" target="_blank" rel="noopener">Regs</a>
-              <a class="btn" href="${askHref}" target="_blank" rel="noopener">Ask GPT</a>
-              <span class="small" id="fly-${i}">Fly shop: loading…</span>
+              <details class="dropdown">
+                <summary class="btn">Ask GPT ▾</summary>
+                <div class="menu">
+                  <a href="${chatGPTUrl(buildRegsPrompt(r.name, r.siteName))}" target="_blank" rel="noopener">Regulations</a>
+                  <a href="${chatGPTUrl(buildSuggestedFliesPrompt(r.name))}" target="_blank" rel="noopener">Suggested Flies</a>
+                  <a href="${chatGPTUrl(buildLocalShopsPrompt(r.lat, r.lon))}" target="_blank" rel="noopener">Local Fly Shops</a>
+                </div>
+              </details>
             </td>
           </tr>
         `;
@@ -931,21 +915,6 @@
 
       // Persist current results for download
       window.__riverRankerResults = filtered;
-
-      // Fetch nearest fly shop details per row asynchronously and update DOM
-      filtered.forEach(async (r, i) => {
-        const el = document.getElementById(`fly-${i}`);
-        if (!el) return;
-        const shop = await fetchNearestFlyShop(r.lat, r.lon);
-        if (!shop){
-          el.textContent = 'Fly shop: n/a';
-          return;
-        }
-        const map = mapHrefFor(shop.lat, shop.lon);
-        const phone = shop.phone ? ` • ${shop.phone}` : '';
-        const site = shop.website ? ` • <a href="${shop.website}" target="_blank" rel="noopener">site</a>` : '';
-        el.innerHTML = `Fly shop: <a href="${map}" target="_blank" rel="noopener">${shop.name}</a> (${shop.miles} mi)${phone}${site}`;
-      });
     }
 
     document.getElementById('refresh').addEventListener('click', build);

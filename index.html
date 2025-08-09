@@ -17,6 +17,9 @@
     button { padding:8px 12px; border:1px solid #333; background:#fff; border-radius:8px; font-size:14px; }
     .legend { font-size:12px; color:#555; margin:8px 0; }
     .chip { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,0.1); font-size:12px; }
+    .flag { display:inline-block; padding:4px 10px; border-radius:10px; font-size:12px; font-weight:600; border:1px solid #333; background:#eef6ff; color:#0b5cab; }
+    .flag.tailwater { background:#e6f4ff; color:#0b5cab; border-color:#0b5cab; }
+    .flag.springfed { background:#eaf7ea; color:#0a6b2b; border-color:#0a6b2b; }
     table { width:100%; border-collapse: collapse; }
     th, td { border:1px solid #e5e5e5; padding:8px; vertical-align:top; font-size:14px; }
     th { background:#fff3e6; text-align:left; }
@@ -35,7 +38,7 @@
 </head>
 <body>
   <header>
-    <h1>River Ranker</h1>
+    <h1>River Ranker</h1><span class="pill">v1</span>
     <span class="pill" id="mode-pill">near me</span>
     <span class="pill" id="season-pill"></span>
     <a href="#" id="how-link" class="btn" style="margin-left:auto;">How this works</a>
@@ -907,7 +910,10 @@
               <div class="small">${r.siteName}</div>
               <div class="meta">${species}${r.parent && r.parent !== r.name ? ` • <span class="small">(${r.parent})</span>` : ''}</div>
               <div class="small">Flies: ${r.flies.join(", ")}</div>
-              <div class="small">${r.tailwater ? 'Tailwater' : (r.springFed ? 'Spring-fed' : '')}</div>
+              <div class="small">
+                ${r.tailwater ? '<span class="flag tailwater">Tailwater</span>' : ''}
+                ${!r.tailwater && r.springFed ? '<span class="flag springfed">Spring‑fed</span>' : ''}
+              </div>
             </td>
             <td>${r.cfs ?? "n/a"}<div class="small">${fresh}</div><div class="small" style="margin-top:4px;">${temp}</div></td>
             <td>${r.miles}</td>

@@ -266,22 +266,45 @@
 
     function titleCase(s){ return s.toLowerCase().replace(/\b([a-z])/g, m => m.toUpperCase()); }
     function normalizeRiverName(siteName){
-      const s = siteName
-        .replace(/\bR\b/ig, "River")
-        .replace(/\bRiv\b/ig, "River")
-        .replace(/\bCr\b/ig, "Creek")
+      // Expand common abbreviations and clean whitespace
+      let s = siteName
+        .replace(/\bR\.?\b/ig, "River")
+        .replace(/\bRiv\.?\b/ig, "River")
+        .replace(/\bCr\.?\b/ig, "Creek")
+        .replace(/\bFk\b/ig, "Fork")
+        .replace(/\bN\.?\s?Fork\b/ig, "North Fork")
+        .replace(/\bS\.?\s?Fork\b/ig, "South Fork")
+        .replace(/\bM\.?\s?Fork\b/ig, "Middle Fork")
+        .replace(/\bE\.?\s?Fork\b/ig, "East Fork")
+        .replace(/\bW\.?\s?Fork\b/ig, "West Fork")
         .replace(/\s+/g, " ")
         .trim();
-      // Pattern 1: North Fork Yuba River (keep full fork+river)
-      const p1 = s.match(/((?:North|South|Middle|East|West|Little)\sFork\s[A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s(River|Creek)/i);
-      if (p1) return `${p1[1]} ${p1[2]}`.replace(/\s+/g,' ').trim();
-      // Pattern 2: <Name> River|Creek (generic)
-      const p2 = s.match(/([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s(River|Creek)/i);
-      if (p2) return `${p2[1]} ${p2[2]}`;
-      // Pattern 3: <Name> Fork
-      const p3 = s.match(/([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\sFork/i);
-      if (p3) return `${p3[1]} Fork`;
-      return s.split(" ").slice(0,3).join(" ");
+
+      // 1) "North Fork Yuba River" → keep
+      let m = s.match(/((?:North|South|Middle|East|West|Little)\sFork\s+[A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+(River|Creek)/i);
+      if (m) return titleCase(`${m[1]} ${m[2]}`);
+
+      // 2) "North Fork of Yuba River"
+      m = s.match(/((?:North|South|Middle|East|West|Little)\sFork)\s+of\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+(River|Creek)/i);
+      if (m) return titleCase(`${m[1]} ${m[2]} ${m[3]}`);
+
+      // 3) "Yuba River - North Fork" or "Yuba River (North Fork)"
+      m = s.match(/([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+(River|Creek).{0,12}\b(North|South|Middle|East|West|Little)\s+Fork\b/i);
+      if (m) return titleCase(`${m[3]} Fork ${m[1]} ${m[2]}`);
+
+      // 4) Abbrev forms like "NF American River"
+      m = s.match(/\b(North|South|Middle|East|West|Little)\s*F(?:ork)?\b\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+(River|Creek)/i);
+      if (m) return titleCase(`${m[1]} Fork ${m[2]} ${m[3]}`);
+
+      // 5) Generic "<Name> River|Creek"
+      m = s.match(/([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+(River|Creek)/i);
+      if (m) return titleCase(`${m[1]} ${m[2]}`);
+
+      // 6) "<Name> Fork" (no parent river captured)
+      m = s.match(/([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)*)\s+Fork/i);
+      if (m) return titleCase(`${m[1]} Fork`);
+
+      return titleCase(s.split(" ").slice(0,3).join(" "));
     }
     const INCLUDE = /\b(River|Creek|Fork|Run|Brook|Branch|Headwaters)\b/i;
     const EXCLUDE = /\b(Canal|Slough|Ditch|Drain|Diversion|Aqueduct|Wastewater|Effluent|Outfall|Estuary|Tidal|Delta|Lagoon|Pond|Lake|Reservoir|Island)\b/i;

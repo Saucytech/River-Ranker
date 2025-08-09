@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>River Ranker</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <style>
+    body { font-family: -apple-system, system-ui, Helvetica, Arial, sans-serif; margin: 0; padding: 16px; }
+    header { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    h1 { font-size: 20px; margin: 0 8px 0 0; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #ccc; font-size:12px; color:#333; }
+    .controls { margin:10px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    input[type="number"] { width: 80px; padding:6px; }
+    button { padding:8px 12px; border:1px solid #333; background:#fff; border-radius:8px; font-size:14px; }
+    .legend { font-size:12px; color:#555; margin:8px 0; }
+    .chip { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid rgba(0,0,0,0.1); font-size:12px; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border:1px solid #e5e5e5; padding:8px; vertical-align:top; font-size:14px; }
+    th { background:#fff3e6; text-align:left; }
+    tr:hover { background:#fafafa; }
+    .small { font-size:12px; color:#666; }
+    .meta { font-size:12px; color:#444; margin-top:4px; }
+    .btn { display:inline-block; padding:6px 10px; margin:6px 6px 0 0; border:1px solid #333; text-decoration:none; border-radius:8px; font-size:13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>River Ranker</h1>
+    <span class="pill" id="mode-pill">near me</span>
+    <span class="pill" id="season-pill"></span>
+  </header>
+
+  <div class="controls">
+    <label>Radius mi <input id="radius" type="number" min="10" max="500" step="10" value="250"></label>
+    <label>Max rivers <input id="limit" type="number" min="5" max="50" step="5" value="25"></label>
+    <button id="refresh">Refresh</button>
+    <span class="small" id="origin"></span>
+  </div>
+  <div class="small" id="status"></div>
+
+  <div class="legend">
+    <span class="chip" style="background:#1db954">live</span>
+    <span class="chip" style="background:#75d696">&lt;24h</span>
+    <span class="chip" style="background:#ffdd57">24–72h</span>
+    <span class="chip" style="background:#ffa141">72h–1w</span>
+    <span class="chip" style="background:#ff5d5d">&gt;1w</span>
+  </div>
+
+  <table id="table">
+    <thead>
+      <tr>
+        <th>#</th><th>River</th><th>Flow • Freshness • Temp</th><th>Mi</th><th>Score</th><th>Open</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    // cache-bust service worker on dev reloads
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.update())).catch(() => {});
+    }
+    // Config
+    const PARAM_FLOW = "00060";
+    const PARAM_TEMP = "00010";
+    const SUMMER = (() => { const m = new Date().getMonth()+1; return m>=6 && m<=9; })();
+    document.getElementById('season-pill').textContent = SUMMER ? "summer boost on" : "neutral season";
+
+    const FRESH = [
+      { maxHrs: 1,    color: "#1db954", label: "live" },
+      { maxHrs: 24,   color: "#75d696", label: "<24h" },
+      { maxHrs: 72,   color: "#ffdd57", label: "24–72h" },
+      { maxHrs: 168,  color: "#ffa141", label: "72h–1w" },
+      { maxHrs: Infinity, color: "#ff5d5d", label: ">1w" }
+    ];
+
+    const SPECIES_ICON = { rainbow:"🟦", brown:"🟨", brook:"🟥", cutthroat:"🟧", steelhead:"🎯" };
+    const defaultSpecies = ["rainbow"];
+
+    function g(q){ return "https://www.google.com/search?q=" + encodeURIComponent(q); }
+    function chatGPTUrl(prompt){ return `https://chatgpt.com/?q=${encodeURIComponent(prompt)}&hints=search`; }
+
+    function buildRegsPrompt(riverName, siteName){
+      return `Search the web and provide the most current and up-to-date fishing regulations specifically for trout on ${riverName} near "${siteName}" in California. Include season dates, gear restrictions (artificials, barbless), bag and possession limits, special closures or exceptions, and any catch-and-release rules. Cite and link the official CDFW page(s) you used. Keep it concise and actionable.`;
+    }
+
+    function titleCase(s){ return s.toLowerCase().replace(/\b([a-z])/g, m => m.toUpperCase()); }
+    function normalizeRiverName(siteName){
+      const nice = titleCase(siteName.replace(/\bR\b/g,"River").replace(/\bRiv\b/gi,"River").replace(/\bCr\b/gi,"Creek").replace(/\bNr\b/gi,"near").replace(/\bAt\b/gi,"at").replace(/\s+/g," ").trim());
+      const m = nice.match(/([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\s(River|Creek)/);
+      return m ? `${m[1]} ${m[2]}` : nice.split(" ").slice(0,3).join(" ");
+    }
+    function looksTrouty(name){
+      const n = name.toUpperCase();
+      if (!/(RIVER|CREEK|FORK)/.test(n)) return false;
+      if (/(CANAL|SLOUGH|WASTEWAY|DIVERSION|WATERWAY|DRAIN)/.test(n)) return false;
+      return true;
+    }
+
+    function distMi(a, b){
+      const toRad = x => x * Math.PI / 180;
+      const R = 3958.761;
+      const dLat = toRad(b.lat - a.lat);
+      const dLon = toRad(b.lon - a.lon);
+      const lat1 = toRad(a.lat);
+      const lat2 = toRad(b.lat);
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    }
+    function fishabilityScore(cfs){
+      if (!isFinite(cfs) || cfs <= 0) return 0;
+      if (cfs < 60) return 0.2;
+      if (cfs < 150) return 0.8;
+      if (cfs < 400) return 1.0;
+      if (cfs < 900) return 0.7;
+      if (cfs < 1500) return 0.5;
+      return 0.3;
+    }
+    function seasonScore(tailwater){
+      if (!SUMMER) return 0.5;
+      if (tailwater === true) return 1.0;
+      return 0.6; // slight boost otherwise
+    }
+    function distanceScore(mi){
+      const cap = 300;
+      return Math.max(0, 1 - Math.min(mi, cap)/cap);
+    }
+    function round2(x){ return Math.round(x*100)/100; }
+
+    function ageHours(ts){
+      const t = Date.parse(ts);
+      if (!isFinite(t)) return Infinity;
+      return (Date.now() - t) / 3.6e6;
+    }
+    function freshnessChip(ts){
+      const hrs = ageHours(ts);
+      let meta = FRESH[FRESH.length-1];
+      for (const f of FRESH){ if (hrs <= f.maxHrs){ meta = f; break; } }
+      const label = !isFinite(hrs) ? "n/a" : meta.label;
+      const color = !isFinite(hrs) ? "#ccc" : meta.color;
+      const rel = !isFinite(hrs) ? "" : hrs < 1 ? `${Math.max(1, Math.round(hrs*60))} m ago` : hrs < 24 ? `${Math.round(hrs)} h ago` : `${Math.floor(hrs/24)} d ago`;
+      return `<span class="chip" style="background:${color}" title="${ts || 'n/a'}">${label}</span> <span class="small">${rel}</span>`;
+    }
+    function tempBadge(tempC){
+      if (!isFinite(tempC)) return `<span class="chip" style="background:#ccc">n/a</span>`;
+      const F = tempC*9/5+32;
+      let bg = "#77c5ff";
+      if (F <= 65) bg = "#a7e07a";
+      else if (F <= 68) bg = "#ffdd57";
+      else bg = "#ff6b6b";
+      return `<span class="chip" style="background:${bg}">${Math.round(F)}°F</span>`;
+    }
+
+    function regsUrl(label){ return g(`${label} fishing regulations site:wildlife.ca.gov`); }
+
+    async function getOrigin(){
+      const HOME = { lat: 37.0897, lon: -122.089 };
+      return new Promise(resolve => {
+        if (!navigator.geolocation){
+          resolve(HOME);
+          return;
+        }
+        const opt = { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 };
+        navigator.geolocation.getCurrentPosition(
+          pos => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+          ()  => resolve(HOME),
+          opt
+        );
+      });
+    }
+
+    function milesToBBox(center, radiusMi){
+      const latDeg = radiusMi / 69.0;
+      const lonDeg = radiusMi / (69.172 * Math.cos(center.lat * Math.PI/180));
+      return { west: center.lon - lonDeg, east: center.lon + lonDeg, south: center.lat - latDeg, north: center.lat + latDeg };
+    }
+
+    // Split a large bbox into a grid of smaller tiles to avoid USGS 400 errors
+    function tileBBoxes(bbox, maxSpanDeg = 0.5){
+      const latSpan = Math.max(0, bbox.north - bbox.south);
+      const lonSpan = Math.max(0, bbox.east - bbox.west);
+      const nLat = Math.max(1, Math.ceil(latSpan / maxSpanDeg));
+      const nLon = Math.max(1, Math.ceil(lonSpan / maxSpanDeg));
+      const tiles = [];
+      for (let i = 0; i < nLat; i++){
+        const s = bbox.south + (latSpan * i / nLat);
+        const n = bbox.south + (latSpan * (i+1) / nLat);
+        for (let j = 0; j < nLon; j++){
+          const w = bbox.west + (lonSpan * j / nLon);
+          const e = bbox.west + (lonSpan * (j+1) / nLon);
+          tiles.push({ west: w, south: s, east: e, north: n });
+        }
+      }
+      return tiles;
+    }
+
+    function clampTile(t){
+      const west = Math.max(-180, Math.min(180, t.west));
+      const east = Math.max(-180, Math.min(180, t.east));
+      const south = Math.max(-90, Math.min(90, t.south));
+      const north = Math.max(-90, Math.min(90, t.north));
+      if (east <= west || north <= south) return null;
+      return { west, east, south, north };
+    }
+
+    function splitTile(t){
+      const c = clampTile(t);
+      if (!c) return [];
+      const midLat = (c.north + c.south) / 2;
+      const midLon = (c.east + c.west) / 2;
+      return [
+        { west: c.west, south: c.south, east: midLon, north: midLat },
+        { west: midLon, south: c.south, east: c.east, north: midLat },
+        { west: c.west, south: midLat, east: midLon, north: c.north },
+        { west: midLon, south: midLat, east: c.east, north: c.north }
+      ];
+    }
+
+    // California bounding box (approx)
+    function isInCalifornia(lat, lon){
+      return lat >= 32 && lat <= 42 && lon >= -125 && lon <= -114.1;
+    }
+
+    // Fetch active sites with flow inside bbox
+    async function fetchSitesInBBox(bbox, onProgress){
+      const tiles = tileBBoxes(bbox, 0.5);
+      const map = new Map();
+      const concurrency = 1;
+      let idx = 0;
+      let completed = 0;
+      async function fetchTileRecursive(t, depth){
+        const c = clampTile(t);
+        if (!c) return;
+        const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&bBox=${c.west},${c.south},${c.east},${c.north}&parameterCd=${PARAM_FLOW}&siteType=ST&siteStatus=active`;
+        try {
+          const res = await fetch(url);
+          if (res.ok){
+            const json = await res.json();
+            const series = json?.value?.timeSeries || [];
+            for (const ts of series){
+              const info = ts?.sourceInfo;
+              const code = info?.siteCode?.[0]?.value;
+              const name = info?.siteName || "";
+              const lat = Number(info?.geoLocation?.geogLocation?.latitude);
+              const lon = Number(info?.geoLocation?.geogLocation?.longitude);
+              if (code && isFinite(lat) && isFinite(lon) && isInCalifornia(lat, lon) && !map.has(code)){
+                map.set(code, { siteCode: code, siteName: name, lat, lon });
+              }
+            }
+            return;
+          }
+          if (res.status === 400 && depth < 2){
+            const parts = splitTile(c);
+            for (const p of parts){
+              await fetchTileRecursive(p, depth+1);
+            }
+          }
+        } catch (e) {
+          // ignore network errors
+        }
+      }
+      async function worker(){
+        while (true){
+          const i = idx++;
+          if (i >= tiles.length) break;
+          const t = tiles[i];
+          try {
+            await fetchTileRecursive(t, 0);
+          } finally {
+            completed++;
+            if (onProgress) onProgress(completed, tiles.length);
+          }
+        }
+      }
+      const workers = Array.from({length: concurrency}, () => worker());
+      await Promise.all(workers);
+      return Array.from(map.values());
+    }
+
+    // Fallback: fetch all CA stream gauges with discharge via IV by state
+    async function fetchSitesInStateCA(){
+      const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&stateCd=CA&parameterCd=${PARAM_FLOW}&siteType=ST&siteStatus=active`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`USGS state fetch ${res.status}`);
+      const json = await res.json();
+      const series = json?.value?.timeSeries || [];
+      const map = new Map();
+      for (const ts of series){
+        const info = ts?.sourceInfo;
+        const code = info?.siteCode?.[0]?.value;
+        const name = info?.siteName || "";
+        const lat = Number(info?.geoLocation?.geogLocation?.latitude);
+        const lon = Number(info?.geoLocation?.geogLocation?.longitude);
+        if (code && isFinite(lat) && isFinite(lon) && isInCalifornia(lat, lon) && !map.has(code)){
+          map.set(code, { siteCode: code, siteName: name, lat, lon });
+        }
+      }
+      return Array.from(map.values());
+    }
+
+    // Progressively expand radius from the user's location, fetching small rings
+    async function fetchSitesAround(origin, maxRadiusMi, stepMi, onProgress){
+      const step = Math.max(25, stepMi || 75);
+      const all = new Map();
+      let doneTiles = 0, totalTiles = 0;
+      // Pre-compute total tiles for status
+      for (let r = step; r <= maxRadiusMi; r += step){
+        const tiles = tileBBoxes(milesToBBox(origin, r), 2);
+        totalTiles += tiles.length;
+      }
+      const progress = (inc) => {
+        doneTiles += inc;
+        if (onProgress) onProgress(doneTiles, totalTiles);
+      };
+      for (let r = step; r <= maxRadiusMi; r += step){
+        const bbox = milesToBBox(origin, r);
+        const before = doneTiles;
+        const ringSites = await fetchSitesInBBox(bbox, (d, t) => {
+          // convert per-bbox progress to global approx
+          const inc = d - (doneTiles - before);
+          if (inc > 0) progress(inc);
+        });
+        for (const s of ringSites){
+          if (!all.has(s.siteCode)) all.set(s.siteCode, s);
+        }
+      }
+      return Array.from(all.values());
+    }
+
+    // Batch fetch flow + temp
+    async function fetchFlowAndTemp(ids){
+      if (!ids.length) return {};
+      const out = {};
+      const chunk = 80;
+      for (let i = 0; i < ids.length; i += chunk){
+        const slice = ids.slice(i, i+chunk);
+        const url = `https://waterservices.usgs.gov/nwis/iv/?format=json&parameterCd=${PARAM_FLOW},${PARAM_TEMP}&sites=${slice.join(",")}`;
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const json = await res.json();
+        const series = json?.value?.timeSeries || [];
+        for (const ts of series){
+          const site = ts?.sourceInfo?.siteCode?.[0]?.value;
+          const varCd = ts?.variable?.variableCode?.[0]?.value;
+          const vals = ts?.values?.[0]?.value;
+          if (!site || !vals || !vals.length) continue;
+          const latest = vals[vals.length-1];
+          if (!out[site]) out[site] = {};
+          if (varCd === PARAM_FLOW){
+            out[site].cfs = Number(latest.value);
+            out[site].flowTime = latest.dateTime;
+          } else if (varCd === PARAM_TEMP){
+            out[site].tempC = Number(latest.value);
+            out[site].tempTime = latest.dateTime;
+          }
+        }
+      }
+      return out;
+    }
+
+    async function build(){
+      const radius = Number(document.getElementById('radius').value || 250);
+      const limit = Number(document.getElementById('limit').value || 25);
+      const origin = await getOrigin();
+      document.getElementById('origin').textContent = `Origin ${origin.lat.toFixed(2)}, ${origin.lon.toFixed(2)}`;
+      const bbox = milesToBBox(origin, radius);
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = `Loading USGS…`;
+      let sites = [];
+      try {
+        // First try CA-wide to avoid tile storms; then intersect with radius
+        statusEl.textContent = 'Loading USGS CA-wide…';
+        sites = await fetchSitesInStateCA();
+        // Then, if still empty (unlikely), fall back to rings
+        if (!sites.length){
+          statusEl.textContent = `No sites via state. Trying rings…`;
+          sites = await fetchSitesAround(origin, radius, 75, (done, total) => { statusEl.textContent = `Loading USGS… (${done}/${total})`; });
+        }
+      } catch (err) {
+        statusEl.textContent = `Failed to load USGS data: ${err?.message || err}`;
+        return;
+      }
+      // normalize first, then trouty-filter on normalized label
+      sites = sites.map(s => ({...s, label: normalizeRiverName(s.siteName), dist: distMi(origin, s)}));
+      sites = sites.filter(s => looksTrouty(s.label))
+                   .sort((a,b) => a.dist - b.dist);
+
+      const chosen = [];
+      const seen = new Set();
+      for (const s of sites){
+        if (seen.has(s.label)) continue;
+        seen.add(s.label);
+        chosen.push(s);
+        if (chosen.length >= limit) break;
+      }
+
+      const ids = chosen.map(s => s.siteCode);
+      const data = await fetchFlowAndTemp(ids);
+
+      const rows = chosen.map(s => {
+        const d = data[s.siteCode] || {};
+        const cfs = isFinite(d.cfs) ? Math.round(d.cfs) : null;
+        const f = fishabilityScore(d.cfs);
+        const ds = Math.max(0, 1 - Math.min(s.dist, 300)/300);
+        const ss = seasonScore(false); // unknown tailwater status in pure dynamic mode
+        const score = 0.5*f + 0.3*ds + 0.2*ss;
+        return {
+          name: s.label,
+          siteName: s.siteName,
+          lat: s.lat, lon: s.lon,
+          miles: Math.round(s.dist),
+          cfs, flowTime: d.flowTime || null, tempC: d.tempC,
+          score: round2(score),
+          species: defaultSpecies
+        };
+      }).sort((a,b) => b.score - a.score);
+
+      const tbody = document.querySelector("#table tbody");
+      tbody.innerHTML = rows.map((r, i) => {
+        const fresh = freshnessChip(r.flowTime);
+        const temp = tempBadge(r.tempC);
+        const species = r.species.map(k => SPECIES_ICON[k] || "🐟").join(" ");
+        const askHref = chatGPTUrl(buildRegsPrompt(r.name, r.siteName));
+        const regsHref = g(`${r.name} fishing regulations site:wildlife.ca.gov`);
+        return `
+          <tr>
+            <td>${i+1}</td>
+            <td>
+              ${r.name}
+              <div class="small">${r.siteName}</div>
+              <div class="meta">${species} • ${SUMMER ? "summer" : "shoulder"} season</div>
+            </td>
+            <td>${r.cfs ?? "n/a"}<div class="small">${fresh}</div><div class="small" style="margin-top:4px;">${temp}</div></td>
+            <td>${r.miles}</td>
+            <td>${r.score}</td>
+            <td>
+              <a class="btn" href="https://maps.apple.com/?ll=${r.lat},${r.lon}&q=${encodeURIComponent(r.name)}">Map</a>
+              <a class="btn" href="${regsHref}" target="_blank" rel="noopener">Regs</a>
+              <a class="btn" href="${askHref}" target="_blank" rel="noopener">Ask GPT</a>
+            </td>
+          </tr>
+        `;
+      }).join("");
+      statusEl.textContent = `${rows.length} rivers within ${radius} mi`;
+    }
+
+    document.getElementById('refresh').addEventListener('click', build);
+
+    // PWA install
+    if ("serviceWorker" in navigator){
+      window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js"));
+    }
+
+    // First load
+    build();
+  </script>
+</body>
+</html>

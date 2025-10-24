@@ -53,7 +53,7 @@
 
   <div class="controls">
     <label>Radius mi <input id="radius" type="number" min="10" max="500" step="10" value="250"></label>
-    <label>Max rivers <input id="limit" type="number" min="5" max="50" step="5" value="25"></label>
+    <label>Max rivers <input id="limit" type="number" min="5" max="500" step="5" value="100"></label>
     <button id="refresh">Refresh</button>
     <span class="small" id="origin"></span>
     <label class="small"><input type="checkbox" id="hasTempOnly"> Has temp only</label>
@@ -404,6 +404,15 @@
       // Southern Sierra (Golden Trout Wilderness area)
       if (lat >= 35.8 && lat <= 36.8 && lon >= -118.8 && lon <= -117.8) return true;
 
+      // Santa Cruz Mountains / Central Coast Ranges
+      if (lat >= 36.5 && lat <= 37.5 && lon >= -122.5 && lon <= -121.5) return true;
+
+      // Northern Coast Ranges (Mendocino/Humboldt area)
+      if (lat >= 38.5 && lat <= 40.5 && lon >= -123.8 && lon <= -122.5) return true;
+
+      // Southern California mountains (San Gabriel, San Bernardino)
+      if (lat >= 34.0 && lat <= 35.0 && lon >= -118.5 && lon <= -116.5) return true;
+
       return false;
     }
 
@@ -418,19 +427,13 @@
       if (EXTRA_EXCLUDE.test(name)) return false;
       if (/\b(at|near)\s+mouth\b/i.test(name)) return false;
 
-      // Smart creek filtering: allow if whitelisted OR in trout zone
+      // More inclusive creek filtering: show all creeks, let scoring handle quality
+      // Only reject creeks with obvious warm-water or problematic indicators
       if (/\bCreek\b/i.test(label)) {
-        // Whitelisted creeks always pass
-        if (TROUT_CREEK_WHITELIST.has(label)) return true;
-
-        // Creeks in known trout zones pass
-        if (inTroutZone(lat, lon)) return true;
-
-        // Creeks with "Trout", "Spring", "Cold", "Snow" in name likely good
-        if (/\b(Trout|Spring|Cold|Snow|Golden)\b/i.test(label)) return true;
-
-        // Otherwise reject
-        return false;
+        // Reject obviously problematic creeks
+        if (/\b(Warm|Hot\s+Spring|Irrigation|Urban|Waste|Sewage)\b/i.test(label)) return false;
+        // Accept all other creeks - scoring will rank them appropriately
+        return true;
       }
 
       // All rivers pass if they made it this far
@@ -938,7 +941,7 @@
 
     async function build(){
       const radius = Number(document.getElementById('radius').value || 250);
-      const limit = Number(document.getElementById('limit').value || 25);
+      const limit = Number(document.getElementById('limit').value || 100);
       const origin = await getOrigin();
       document.getElementById('origin').textContent = `Origin ${origin.lat.toFixed(2)}, ${origin.lon.toFixed(2)}`;
       const bbox = milesToBBox(origin, radius);
@@ -971,13 +974,12 @@
       };
       const chosen = [];
       const seen = new Set();
-      const maxCandidates = Math.max(limit * 3, 150);
+      // Process ALL sites - no artificial limit (user can control via "Max rivers" input)
       for (const s of sites){
         const label = s.label;
         if (seen.has(label)) continue;
         seen.add(label);
         chosen.push({ ...s, parent: forksMap[label] || label });
-        if (chosen.length >= maxCandidates) break;
       }
 
       const ids = chosen.map(s => s.siteCode);

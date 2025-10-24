@@ -153,13 +153,37 @@
       "North Fork Yuba River", "Middle Fork Yuba River", "South Fork Yuba River", "Lower Yuba River"
     ]);
     const TROUT_CREEK_WHITELIST = new Set([
-      "Hat Creek", "Putah Creek", "Hot Creek", "Silver Creek", "Rush Creek", "Lee Vining Creek",
-      "Upper Truckee River", "Mammoth Creek", "Big Pine Creek", "Bishop Creek"
+      // Proven classics
+      "Hat Creek", "Putah Creek", "Hot Creek", "Silver Creek", "Fall River", "Rush Creek", "Lee Vining Creek",
+      "Upper Truckee River", "Mammoth Creek", "Big Pine Creek", "Bishop Creek",
+      // Eastern Sierra
+      "Convict Creek", "Rock Creek", "Hilton Creek", "McGee Creek", "Pine Creek", "Sabrina Creek",
+      "South Lake Creek", "North Lake Creek", "Green Creek", "Virginia Creek", "Mill Creek",
+      "Horton Creek", "Crooked Creek", "Pleasant Valley Creek",
+      // Tahoe/Truckee Basin
+      "Martis Creek", "Sagehen Creek", "Prosser Creek", "Independence Creek", "Trout Creek",
+      "Blackwood Creek", "Ward Creek", "General Creek", "Squaw Creek", "Incline Creek",
+      // Northern California
+      "Burney Creek", "Butte Creek", "Deer Creek", "Mill Creek", "Battle Creek", "Antelope Creek",
+      "Clear Creek", "Cottonwood Creek", "Cow Creek", "Digger Creek", "Hat Creek",
+      // Sierra Nevada (West Slope)
+      "Silver Fork American River", "Granite Creek", "Bear Creek", "Cherry Creek",
+      "Dinkey Creek", "Rancheria Creek", "Big Creek", "San Joaquin River tributaries",
+      // Southern Sierra
+      "Golden Trout Creek", "Cottonwood Creek", "Mulkey Creek", "Osa Creek", "Volcano Creek",
+      "Jackass Creek", "Ninemile Creek", "Clicks Creek",
+      // Trinity/Klamath Basin
+      "Coffee Creek", "Canyon Creek", "Stuart Fork", "East Fork Stuart Fork", "Swift Creek",
+      "South Fork Salmon River", "Wooley Creek", "Elk Creek",
+      // Central Sierra
+      "Lyons Creek", "Woods Creek", "Piute Creek", "Evolution Creek", "Palisade Creek"
     ]);
     const LARGE_TAILWATER_WHITELIST = new Set([
       "Sacramento River", "American River", "Feather River", "Trinity River", "Klamath River"
     ]);
-    const SPRINGFED_WHITELIST = new Set(["Fall River", "Hat Creek"]);
+    const SPRINGFED_WHITELIST = new Set([
+      "Fall River", "Hat Creek", "Hot Creek", "Silver Creek", "Burney Creek", "Crystal Lake Creek"
+    ]);
     const STEELHEAD_RIVERS = new Set(["Russian River", "American River", "Trinity River", "Klamath River", "Eel River", "Smith River"]);
     const EXTRA_EXCLUDE = /\b(Byron|Middle River|Old River|False River|Forebay|Franks\s+Tract|Clifton\s+Court|Andrus\s+Island)\b/i;
 
@@ -169,20 +193,89 @@
       "San Antonio River", "Nacimiento River", "Cosumnes River", "Bear River", "San Lorenzo River",
       "Lower American River", "Russian River"
     ]);
-    // Approximate ideal flows (cfs) for some rivers; fallback to 30d median otherwise
+    // Approximate ideal flows (cfs) for fishability by river/creek
     const IDEAL_FLOW = new Map([
-      ["Truckee River", 400],
-      ["Little Truckee River", 150],
-      ["McCloud River", 400],
-      ["Upper Sacramento River", 350],
-      ["Pit River", 600],
-      ["Feather River", 1200],
-      ["American River", 1200],
-      ["Yuba River", 900],
-      ["Sacramento River", 6000],
+      // Small Creeks (10-150 CFS ideal)
+      ["Hat Creek", 180],
+      ["Hot Creek", 80],
+      ["Fall River", 120],
       ["Putah Creek", 250],
-      ["Hat Creek", 200]
+      ["Silver Creek", 60],
+      ["Martis Creek", 40],
+      ["Burney Creek", 70],
+      ["Convict Creek", 50],
+      ["Rock Creek", 60],
+      ["Hilton Creek", 40],
+      ["McGee Creek", 45],
+      ["Rush Creek", 80],
+      ["Lee Vining Creek", 70],
+      ["Sagehen Creek", 30],
+      ["Battle Creek", 120],
+      ["Deer Creek", 180],
+      ["Butte Creek", 150],
+      ["Mill Creek", 100],
+
+      // Medium Creeks/Small Rivers (150-500 CFS ideal)
+      ["Little Truckee River", 200],
+      ["Owens River", 300],
+      ["Upper Owens River", 250],
+      ["Lower Owens River", 350],
+      ["Bishop Creek", 120],
+      ["Big Pine Creek", 100],
+      ["Clear Creek", 400],
+      ["Cottonwood Creek", 200],
+
+      // Medium Rivers (400-1200 CFS ideal)
+      ["Truckee River", 450],
+      ["McCloud River", 450],
+      ["Upper Sacramento River", 600],
+      ["Kern River", 800],
+      ["Kings River", 1000],
+      ["Merced River", 800],
+      ["Tuolumne River", 900],
+      ["Stanislaus River", 800],
+      ["Trinity River", 1000],
+      ["Pit River", 700],
+
+      // Large Rivers (1200-4000 CFS ideal)
+      ["American River", 2000],
+      ["North Fork American River", 800],
+      ["Middle Fork American River", 600],
+      ["South Fork American River", 700],
+      ["Feather River", 1800],
+      ["Yuba River", 1200],
+      ["North Fork Yuba River", 600],
+      ["Middle Fork Yuba River", 400],
+      ["South Fork Yuba River", 500],
+      ["San Joaquin River", 1500],
+      ["Klamath River", 3500],
+      ["Smith River", 2500],
+      ["Eel River", 2000],
+
+      // Very Large Rivers (4000+ CFS ideal)
+      ["Sacramento River", 6000]
     ]);
+    // River size classification based on ideal flow
+    function getRiverClass(riverName, idealCFS) {
+      const ideal = idealCFS || IDEAL_FLOW.get(riverName) || null;
+      if (!ideal) return "UNKNOWN";
+      if (ideal <= 150) return "CREEK";        // Small creeks: tight flow window
+      if (ideal <= 500) return "SMALL_RIVER";  // Medium creeks/small rivers
+      if (ideal <= 1500) return "MEDIUM_RIVER"; // Medium rivers
+      return "LARGE_RIVER";                     // Large rivers: wide flow window
+    }
+
+    // Get flow tolerance multipliers by river class
+    function getFlowTolerance(riverClass) {
+      switch(riverClass) {
+        case "CREEK": return { low: 0.6, high: 1.4 };        // ±40% tolerance
+        case "SMALL_RIVER": return { low: 0.5, high: 1.8 };  // -50% to +80%
+        case "MEDIUM_RIVER": return { low: 0.4, high: 2.5 }; // -60% to +150%
+        case "LARGE_RIVER": return { low: 0.3, high: 3.5 };  // -70% to +250%
+        default: return { low: 0.5, high: 2.0 };
+      }
+    }
+
     // Hatch data (starter; extend over time)
     const HATCH_DATA = {
       "Truckee River": { 8:["PMD","Caddis","Terrestrials"], 9:["BWO","Oktober Caddis"] },
@@ -288,14 +381,59 @@
     }
     const INCLUDE = /\b(River|Creek|Fork|Run|Brook|Branch|Headwaters)\b/i;
     const EXCLUDE = /\b(Canal|Slough|Ditch|Drain|Diversion|Aqueduct|Wastewater|Effluent|Outfall|Estuary|Tidal|Delta|Lagoon|Pond|Lake|Reservoir|Island)\b/i;
-    function looksTrouty(name){
+
+    // Check if coordinates are in known trout regions (high-elevation zones in CA)
+    function inTroutZone(lat, lon){
+      if (!isFinite(lat) || !isFinite(lon)) return false;
+
+      // Eastern Sierra (high elevation corridor)
+      if (lat >= 36.0 && lat <= 38.5 && lon >= -119.5 && lon <= -118.0) return true;
+
+      // Tahoe/Truckee Basin
+      if (lat >= 39.0 && lat <= 39.6 && lon >= -120.5 && lon <= -119.8) return true;
+
+      // Northern California mountains (Cascade Range)
+      if (lat >= 40.5 && lat <= 41.8 && lon >= -122.5 && lon <= -121.0) return true;
+
+      // Central/Northern Sierra Nevada (west slope)
+      if (lat >= 37.5 && lat <= 39.5 && lon >= -121.0 && lon <= -119.5) return true;
+
+      // Trinity Alps / Klamath Mountains
+      if (lat >= 40.5 && lat <= 41.5 && lon >= -123.5 && lon <= -122.5) return true;
+
+      // Southern Sierra (Golden Trout Wilderness area)
+      if (lat >= 35.8 && lat <= 36.8 && lon >= -118.8 && lon <= -117.8) return true;
+
+      return false;
+    }
+
+    function looksTrouty(site){
+      const name = site.siteName || site.label || "";
+      const label = site.label || normalizeRiverName(name);
+      const lat = site.lat;
+      const lon = site.lon;
+
       if (!INCLUDE.test(name)) return false;
       if (EXCLUDE.test(name) && !/\b(Dam|Tailwater|Outlet)\b/i.test(name)) return false;
       if (EXTRA_EXCLUDE.test(name)) return false;
       if (/\b(at|near)\s+mouth\b/i.test(name)) return false;
-      // exclude generic creeks unless whitelisted
-      const label = normalizeRiverName(name);
-      if (/\bCreek\b/i.test(label) && !TROUT_CREEK_WHITELIST.has(label)) return false;
+
+      // Smart creek filtering: allow if whitelisted OR in trout zone
+      if (/\bCreek\b/i.test(label)) {
+        // Whitelisted creeks always pass
+        if (TROUT_CREEK_WHITELIST.has(label)) return true;
+
+        // Creeks in known trout zones pass
+        if (inTroutZone(lat, lon)) return true;
+
+        // Creeks with "Trout", "Spring", "Cold", "Snow" in name likely good
+        if (/\b(Trout|Spring|Cold|Snow|Golden)\b/i.test(label)) return true;
+
+        // Otherwise reject
+        return false;
+      }
+
+      // All rivers pass if they made it this far
       return true;
     }
 
@@ -309,11 +447,47 @@
       const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
       return 2 * R * Math.asin(Math.sqrt(h));
     }
-    function fishabilityScore(cfs){
+    // River-aware fishability score using ideal flows
+    function fishabilityScore(cfs, riverName, medianCFS){
       if (!isFinite(cfs) || cfs <= 0) return 0;
-      // Very high flows are generally unsafe for trout wading except big steelhead rivers
+
+      // Get ideal flow for this specific river/creek
+      const ideal = IDEAL_FLOW.get(riverName);
+
+      if (ideal) {
+        // Use river-specific ideal flow with size-class tolerances
+        const riverClass = getRiverClass(riverName, ideal);
+        const tolerance = getFlowTolerance(riverClass);
+        const ratio = cfs / ideal;
+
+        // Perfect range: within tolerance window
+        if (ratio >= tolerance.low && ratio <= tolerance.high) {
+          // Best score at 0.8x to 1.2x ideal
+          if (ratio >= 0.8 && ratio <= 1.2) return 1.0;
+          // Good score within tolerance
+          return 0.85;
+        }
+
+        // Graceful degradation outside tolerance
+        if (ratio < tolerance.low) {
+          // Too low: score drops as flow decreases
+          const lowScore = Math.max(0.1, ratio / tolerance.low);
+          return lowScore * 0.6;
+        } else {
+          // Too high: score drops as flow increases
+          const highScore = Math.max(0.05, tolerance.high / ratio);
+          return highScore * 0.5;
+        }
+      }
+
+      // Fallback: use median if available
+      if (isFinite(medianCFS) && medianCFS > 0) {
+        const ratio = cfs / medianCFS;
+        return fishabilityFromRatio(ratio);
+      }
+
+      // Last resort: old generic heuristic (but improved)
       if (cfs > 15000) return 0.05;
-      // Piecewise preferences (small/med trout streams)
       if (cfs < 40) return 0.15;
       if (cfs < 120) return 0.8;
       if (cfs < 350) return 1.0;
@@ -322,9 +496,24 @@
       return 0.3;
     }
 
-    // Fishability from 30d ratio (if available)
-    function fishabilityFromRatio(ratio){
+    // Fishability from 30d ratio with optional river class awareness
+    function fishabilityFromRatio(ratio, riverClass){
       if (!isFinite(ratio) || ratio <= 0) return 0;
+
+      // Use class-specific tolerances if available
+      if (riverClass) {
+        const tolerance = getFlowTolerance(riverClass);
+        if (ratio >= tolerance.low && ratio <= tolerance.high) {
+          // Within tolerance: excellent
+          if (ratio >= 0.7 && ratio <= 1.3) return 1.0;
+          return 0.85;
+        }
+        // Outside tolerance: degrade gracefully
+        if (ratio < tolerance.low) return Math.max(0.15, ratio / tolerance.low * 0.6);
+        return Math.max(0.1, tolerance.high / ratio * 0.5);
+      }
+
+      // Generic fallback (old logic)
       if (ratio < 0.25) return 0.2;
       if (ratio < 0.6)  return 0.6;
       if (ratio <= 1.5) return 1.0;
@@ -769,9 +958,9 @@
         statusEl.textContent = `Failed to load USGS data: ${err?.message || err}`;
         return;
       }
-      // normalize first, then trouty-filter on normalized label
+      // normalize first, then trouty-filter with full site data (for geographic awareness)
       sites = sites.map(s => ({...s, label: normalizeRiverName(s.siteName), dist: distMi(origin, s)}));
-      sites = sites.filter(s => looksTrouty(s.label))
+      sites = sites.filter(s => looksTrouty(s))
                    .sort((a,b) => a.dist - b.dist);
 
       // Fork-aware grouping: treat forks as separate labels, group to parent for display (stored later)
@@ -806,11 +995,19 @@
         const tail = inferTailwater(s.label, s.siteName);
         const spring = isSpringFed(s.label);
         const tempMeta = tempGate(d.tempC);
-        let f = fishabilityScore(d.cfs);
         const median = med30[s.siteCode];
+        const riverClass = getRiverClass(s.label);
+
+        // Use new river-aware fishability scoring
+        let f = fishabilityScore(d.cfs, s.label, median);
+
+        // If median available, also try ratio-based for comparison
         if (isFinite(d.cfs) && isFinite(median) && median > 0){
           const ratio = d.cfs / median;
-          f = fishabilityFromRatio(ratio);
+          const ratioScore = fishabilityFromRatio(ratio, riverClass);
+          // Use the better of the two scores (helps when ideal flow data is incomplete)
+          f = Math.max(f, ratioScore);
+
           // Clamp high flow non-large-tailwater
           if (d.cfs > 5000 && !(tail && LARGE_TAILWATER_WHITELIST.has(s.label))){
             f = Math.min(f, 0.25);
